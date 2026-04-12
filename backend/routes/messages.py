@@ -11,12 +11,24 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def _utc_iso(dt):
+    """Ensure datetime is timezone-aware UTC before ISO conversion."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.isoformat()
+
+
 def _session_active(username):
     """Check that the username has a valid active session."""
     session = sessions_col.find_one({"username": username})
     if not session:
         return False
-    return session["session_end"] > _now()
+    end = session["session_end"]
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=timezone.utc)
+    return end > _now()
 
 
 @messages_bp.route("/send_message", methods=["POST"])
@@ -45,27 +57,25 @@ def send_message():
         "expires_at": now + timedelta(minutes=MESSAGE_TTL_MINUTES),
     }
     messages_col.insert_one(doc)
+    print("Message saved:", doc)
     return jsonify({"status": "sent"})
 
 
 @messages_bp.route("/messages/<path:room>", methods=["GET"])
+@messages_bp.route("/get_messages/<path:room>", methods=["GET"])
 def get_messages(room):
     """
-    Return messages from a room within the last 30 minutes.
-    Query param: ?limit=50  (default 50)
+    Return messages from a room.
     """
-    limit   = int(request.args.get("limit", 50))
-    cutoff  = _now() - timedelta(minutes=MESSAGE_TTL_MINUTES)
+    msgs = list(messages_col.find({"room": room}, {"_id": 0}))
 
-    msgs = list(
-        messages_col.find(
-            {"room": room, "timestamp": {"$gte": cutoff}},
-            {"_id": 0, "username": 1, "room": 1, "message": 1, "timestamp": 1}
-        ).sort("timestamp", 1).limit(limit)
-    )
-
-    # Serialize datetime → ISO string
+    # Serialize datetime → UTC ISO string (with +00:00 so JS treats as UTC)
     for m in msgs:
-        m["timestamp"] = m["timestamp"].isoformat()
+        if "timestamp" in m and isinstance(m["timestamp"], datetime):
+            m["timestamp"] = _utc_iso(m["timestamp"])
+        if "expires_at" in m:
+            del m["expires_at"]
 
     return jsonify(msgs)
+
+
